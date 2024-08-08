@@ -55,7 +55,7 @@ BuildSOM <- function(fsom,
   }
   
   colsToUse <- GetChannels(fsom, colsToUse)
-  
+  # fsom$data becomes a query: no colnames
   fsom$map <- SOM(fsom$data[, colsToUse], silent = silent, ...)
   fsom$map$colsUsed <- colsToUse
   fsom <- UpdateDerivedValues(fsom)
@@ -175,8 +175,9 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
   if(!is.null(importance)){
     data <- data * rep(importance, each = nrow(data))
   }
-  
-  if (is.null(colnames(data))) {
+
+  # Can't use colnames for arrow queries  
+  if (is.null(colnames(data)) & !is(data, "arrow_dplyr_query")) {
     colnames(data) <- as.character(seq_len(ncol(data)))
   }
   # Initialize the grid
@@ -184,11 +185,19 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
   nCodes <- nrow(grid)
   if(is.null(codes)){
     if(init){
-      codes <- initf(data, xdim, ydim)
-      message("Initialization ready\n")
+      if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query")) {
+        warning("Initialization not implemented with arrow dataset")
+        init <- FALSE
+      } else {
+        codes <- initf(data, xdim, ydim)
+        message("Initialization ready\n")
+      }
     } else {
-      codes <- data[sample(1:nrow(data), nCodes, replace = FALSE), , 
-                    drop = FALSE]
+      if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query"))
+        codes <- data %>% slice_sample(n = nCodes, replace = FALSE) %>% collect()
+      else
+        codes <- data[sample(1:nrow(data), nCodes, replace = FALSE), , 
+                      drop = FALSE]
     }
   }
   
@@ -207,22 +216,35 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
   }
   
   # Compute the SOM
+  # codes are the neurons
+  # nhbrdist = neighbor dist
+  # distf: distance in the space of cells
   for(i in seq_len(mst)){
-    res <- .C("C_SOM", data = as.double(data), 
-              codes = as.double(codes), 
-              nhbrdist = as.double(nhbrdist), 
-              alpha = as.double(alpha[[i]]), 
-              radius = as.double(radius[[i]]), 
-              xdists = double(nCodes), 
-              n = as.integer(nrow(data)), 
-              px = as.integer(ncol(data)), 
-              ncodes = as.integer(nCodes), 
-              rlen = as.integer(rlen), 
-              distf = as.integer(distf))
-    
-    codes <- matrix(res$codes, nrow(codes), ncol(codes))
-    colnames(codes) <- colnames(data)
-    nhbrdist <- Dist.MST(codes)
+    n_samples_per_block <- 100000
+    list_n_samples <- rep(n_samples_per_block, nrow(data) %/% n_samples_per_block)
+    list_n_samples <- c(list_n_samples, nrow(data) %% n_samples_per_block)
+    for (n_samples in list_n_samples) {
+      if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query"))
+        data_block <- data %>% slice_sample(n = n_samples) %>% collect()
+      else
+         data_block <- data[sample(1:nrow(data), n_samples), ]
+      print(data_block)
+      res <- .C("C_SOM", data = as.double(data_block), 
+                codes = as.double(codes), 
+                nhbrdist = as.double(nhbrdist), 
+                alpha = as.double(alpha[[i]]), 
+                radius = as.double(radius[[i]]), 
+                xdists = double(nCodes), 
+                n = as.integer(nrow(data_block)), 
+                px = as.integer(ncol(data_block)), 
+                ncodes = as.integer(nCodes), 
+                rlen = as.integer(rlen), 
+                distf = as.integer(distf))
+      
+      codes <- matrix(res$codes, nrow(codes), ncol(codes))
+      colnames(codes) <- colsToUse
+      nhbrdist <- Dist.MST(codes)
+    }
   }
   
   if(!silent) message("Mapping data to SOM\n")

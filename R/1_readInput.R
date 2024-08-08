@@ -92,7 +92,14 @@ ReadInput <- function(input, pattern = ".fcs",
   } else if(is(input, "matrix")){
     flowFrame <- flowCore::flowFrame(input)
     fsom <- AddFlowFrame(fsom, flowFrame)
-  } else if(is(input, "character")){    
+  } else if (is(input, "FileSystemDataset") | is(input, "arrow_dplyr_query")) { # Add for arrow support
+    message("Input is an arrow data: compensation and transformation not yet supported")
+    fsom$compensate <- FALSE
+    fsom$transform <- FALSE
+    fsom$prettyColnames <- names(input)
+    fsom$data <- input
+    fsom <- AddFlowFrame(fsom, input)
+  } else if(is(input, "character")){
     # Replace all directories by the files they contain
     toAdd <- NULL
     toRemove <- NULL
@@ -129,34 +136,66 @@ ReadInput <- function(input, pattern = ".fcs",
     }
   } else {
     stop(paste("Inputs of type", class(input), "are not supported. 
-                    Please supply either a FlowFrame, a FlowSet or an array
-                    of valid paths to files or directories."))
+                Please supply either a FlowFrame, a FlowSet or an array
+                of valid paths to files or directories."))
   }
   
   if(scale){
     if(!silent) message("Scaling the data\n")
     if(!all(is.null(names(scaled.center)))){
-      cols_to_scale <- intersect(colnames(fsom$data), names(scaled.center))
-      sc <- scale(x = fsom$data[, cols_to_scale], 
-                  center = scaled.center[cols_to_scale], 
-                  scale = scaled.scale[cols_to_scale])
-      fsom$data[, cols_to_scale] <- sc
-      fsom$scaled.center <- attr(sc, "scaled:center")
-      fsom$scaled.scale <- attr(sc, "scaled:scale")
+      cols_to_scale <- intersect(names(fsom$data), names(scaled.center))
+      if (is(fsom$data, "FileSystemDataset") | is(fsom$data, "arrow_dplyr_query")) {
+        # Trick because "scale" function not available in Arrow
+        for (col in cols_to_scale) {
+          colCenter <- scaled.center[col]
+          colScale <- scaled.scale[col]
+          funcScaleCol <- function(x) (x-colCenter)/colScale
+          # This creates a query but does not load in memory the data
+          fsom$data <- fsom$data %>%
+            mutate(across(all_of(col), ~ funcScaleCol(.x), .names = "{.col}"))
+        }
+      } else {
+        sc <- scale(x = fsom$data[, cols_to_scale], 
+                    center = scaled.center[cols_to_scale], 
+                    scale = scaled.scale[cols_to_scale])
+        fsom$data[, cols_to_scale] <- sc
+      }
+      fsom$scaled.center <- scaled.center[cols_to_scale]
+      fsom$scaled.scale <- scaled.scale[cols_to_scale]
     } else {
-      
       if (!is.null(toScale)){
         cols_to_scale <- toScale
       } else{
         cols_to_scale <- colnames(fsom$data)
       }
-      fsom$data[,cols_to_scale] <- scale(x = fsom$data[,cols_to_scale], 
-                                         center = TRUE, scale = TRUE)
-      
-      fsom$scaled.center <- attr(fsom$data, "scaled:center")
-      attr(fsom$data, "scaled:center") <- NULL
-      fsom$scaled.scale <- attr(fsom$data, "scaled:scale") 
-      attr(fsom$data, "scaled:scale") <- NULL
+      if (is(fsom$data, "FileSystemDataset") | is(fsom$data, "arrow_dplyr_query")) {
+        colsStats <- fsom$data %>%
+          summarise(across(everything(), list(mean = mean, sd = sd))) %>%
+          collect()
+        colsMeans <-  colsStats[, str_ends(colnames(colsStats), "_mean")]
+        names(colsMeans) <- str_remove_all(colsMeans, "_mean")
+        colsStds <-  colsStats[, str_ends(colnames(colsStats), "_sd")]
+        names(colsStds) <- str_remove_all(colsStds, "_sd")
+        # Trick because "scale" function not available in Arrow
+        for (col in cols_to_scale) {
+          colCenter <- colsMeans[col]
+          colScale <- colsStds[col]
+          funcScaleCol <- function(x) (x-colCenter)/colScale
+          # This creates a query but does not load in memory the data
+          fsom$data <- fsom$data %>%
+            mutate(across(all_of(col), ~ funcScaleCol(.x), .names = "{.col}"))
+        }
+        fsom$scaled.center <- colsMeans
+        fsom$scaled.scale <- colsStds
+      } else {
+        fsom$data[,cols_to_scale] <- scale(x = fsom$data[,cols_to_scale], 
+                                          center = TRUE, scale = TRUE)
+        
+        fsom$scaled.center <- attr(fsom$data, "scaled:center")
+        attr(fsom$data, "scaled:center") <- NULL
+        fsom$scaled.scale <- attr(fsom$data, "scaled:scale") 
+        attr(fsom$data, "scaled:scale") <- NULL
+      }
     }
     
   }
@@ -238,20 +277,26 @@ AddFlowFrame <- function(fsom, flowFrame){
   }
   
   # Add the data to the matrix
-  f <- flowCore::exprs(flowFrame)
-  attr(f, "ranges") <- NULL
-  name <- flowCore::keyword(flowFrame,"FIL")[[1]]
-  if(is.null(name)) name <- flowFrame@description$`$FIL`
-  if(is.null(name)) name <- length(fsom$metaData)+1
-  if(is.null(fsom$data)){ 
-    fsom$data <- f 
-    fsom$metaData <- list()
-    fsom$metaData[[name]] <- c(1, nrow(fsom$data))
+  if (is(fsom$data, "FileSystemDataset") | is(fsom$data, "arrow_dplyr_query")) {
+      name <- length(fsom$metaData)+1
+      fsom$metaData <- list()
+      fsom$metaData[[name]] <- c(1, nrow(fsom$data))
   } else {
-    fsom$data <- rbind(fsom$data, f)
-    fsom$metaData[[name]] <- c(nrow(fsom$data) - nrow(f) + 1, 
-                               nrow(fsom$data))
+    f <- flowCore::exprs(flowFrame)
+    attr(f, "ranges") <- NULL
+    name <- flowCore::keyword(flowFrame,"FIL")[[1]]
+    if(is.null(name)) name <- flowFrame@description$`$FIL`
+    if(is.null(name)) name <- length(fsom$metaData)+1
+    if(is.null(fsom$data)){ 
+      fsom$data <- f 
+      fsom$metaData <- list()
+      fsom$metaData[[name]] <- c(1, nrow(fsom$data))
+    } else {
+      fsom$data <- rbind(fsom$data, f)
+      fsom$metaData[[name]] <- c(nrow(fsom$data) - nrow(f) + 1, 
+                                nrow(fsom$data))
+    }
   }
-  
+
   return(fsom)
 }

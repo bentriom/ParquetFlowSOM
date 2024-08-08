@@ -78,6 +78,7 @@ void C_SOM(double *data,
     double change;
     double (*distf)(double*,double*,int,int,int);
 
+    /* Get the distance function according to distance id 'dist' */
     if(*dist == 1){
         distf = &manh;
     } else if (*dist == 2){
@@ -91,7 +92,7 @@ void C_SOM(double *data,
     }
 
     RANDIN;  
-    niter = rlen * n;
+    niter = rlen * n; /* rlen is like the number of epochs */
     threshold = radii[0];
     thresholdStep = (radii[0] - radii[1]) / (double) niter;
     change = 1.0;

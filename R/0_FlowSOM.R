@@ -795,7 +795,10 @@ ManualVector <- function(manualMatrix, cellTypes){
 #'    GetMarkers(ff, c("FSC-A", "CD3", "FITC-A"))
 #'
 #' @export
-GetChannels <- function(object, markers, exact = TRUE) { 
+GetChannels <- function(object, markers, exact = TRUE) {
+  if (is(object$data, "FileSystemDataset") | is(object$data, "arrow_dplyr_query"))
+    return (names(object$data))
+
   if (is(object, "flowFrame")) {
     object_channels <- unname(flowCore::parameters(object)@data[["name"]])
     object_markers <- unname(flowCore::parameters(object)@data[["desc"]])
