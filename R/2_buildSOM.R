@@ -194,7 +194,7 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
       }
     } else {
       if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query"))
-        codes <- data %>% slice_sample(n = nCodes, replace = FALSE) %>% collect()
+        codes <- as.matrix(data %>% slice_sample(n = nCodes, replace = FALSE) %>% collect())
       else
         codes <- data[sample(1:nrow(data), nCodes, replace = FALSE), , 
                       drop = FALSE]
@@ -223,12 +223,19 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
     n_samples_per_block <- 100000
     list_n_samples <- rep(n_samples_per_block, nrow(data) %/% n_samples_per_block)
     list_n_samples <- c(list_n_samples, nrow(data) %% n_samples_per_block)
-    for (n_samples in list_n_samples) {
-      if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query"))
-        data_block <- data %>% slice_sample(n = n_samples) %>% collect()
-      else
-         data_block <- data[sample(1:nrow(data), n_samples), ]
-      print(data_block)
+    for (j in 1:length(list_n_samples)) {
+      n_samples <- list_n_samples[j]
+      if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query")) {
+        data_block <- as.matrix(data %>%
+                                map_batches(~ as_record_batch(
+                                  sample_frac(as.data.frame(.),
+                                              n_samples/nrow(data)))) %>%
+                                collect())
+      } else {
+        data_block <- data[sample(1:nrow(data), n_samples), ]
+      }
+      message(paste0("Data block number ", j, "/", length(list_n_samples),
+                     " (", nrow(data_block), " samples)"))
       res <- .C("C_SOM", data = as.double(data_block), 
                 codes = as.double(codes), 
                 nhbrdist = as.double(nhbrdist), 
@@ -240,9 +247,8 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
                 ncodes = as.integer(nCodes), 
                 rlen = as.integer(rlen), 
                 distf = as.integer(distf))
-      
       codes <- matrix(res$codes, nrow(codes), ncol(codes))
-      colnames(codes) <- colsToUse
+      colnames(codes) <- names(data)
       nhbrdist <- Dist.MST(codes)
     }
   }
@@ -250,7 +256,10 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
   if(!silent) message("Mapping data to SOM\n")
 
   if (map) {
-    mapping <- MapDataToCodes(codes, data)
+    if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query"))
+      mapping <- MapDataToCodes_Arrow(codes, data)
+    else
+      mapping <- MapDataToCodes(codes, data)
   } else {
     mapping <- NULL
   }
@@ -283,6 +292,28 @@ MapDataToCodes <- function (codes, newdata, distf = 2) {
                 nnDists = double(nrow(newdata)), 
                 distf = as.integer(distf))
   return(cbind(nnCodes$nnCodes, nnCodes$nnDists))
+}
+
+MapDataToCodes_Arrow <- function (codes, newdata, distf = 2) {
+
+  res <- c()
+  n_per_block = 200000
+  for (data_block in split(data_pq,
+         rep(1:ceiling(nrow(data_pq)/n_per_block),
+         each=n_per_block, length.out=nrow(data_pq)))) {
+    data_block <- data_block %>% collect()
+    nnCodes <- .C("C_mapDataToCodes", 
+                  as.double(newdata[, colnames(codes)]), 
+                  as.double(codes),
+                  as.integer(nrow(codes)),
+                  as.integer(nrow(newdata)),
+                  as.integer(ncol(codes)),
+                  nnCodes = integer(nrow(newdata)),
+                  nnDists = double(nrow(newdata)), 
+                  distf = as.integer(distf))
+    res <- rbind(res, cbind(nnCodes$nnCodes, nnCodes$nnDists))
+  }
+  return(res)
 }
 
 #' Select k well spread points from X
