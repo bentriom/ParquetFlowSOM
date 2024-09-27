@@ -220,22 +220,27 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
   # nhbrdist = neighbor dist
   # distf: distance in the space of cells
   for(i in seq_len(mst)){
-    n_samples_per_block <- 100000
+    n_samples_per_block <- 10000
     list_n_samples <- rep(n_samples_per_block, nrow(data) %/% n_samples_per_block)
     list_n_samples <- c(list_n_samples, nrow(data) %% n_samples_per_block)
     for (j in 1:length(list_n_samples)) {
       n_samples <- list_n_samples[j]
       if (is(data, "FileSystemDataset") | is(data, "arrow_dplyr_query")) {
-        data_block <- as.matrix(data %>%
-                                map_batches(~ as_record_batch(
-                                  sample_frac(as.data.frame(.),
-                                              n_samples/nrow(data)))) %>%
-                                collect())
+        data_block <- data %>%
+          map_batches(~ as_record_batch(
+            sample_frac(as.data.frame(.), n_samples/nrow(data)))) %>%
+          collect()
+        # data_block <- data[sample(1:nrow(data), n_samples), ] %>% collect()
+        data_block <- as.matrix(data_block)
       } else {
         data_block <- data[sample(1:nrow(data), n_samples), ]
       }
       message(paste0("Data block number ", j, "/", length(list_n_samples),
                      " (", nrow(data_block), " samples)"))
+      # message(typeof(data_block))
+      # message(class(data_block))
+      # message(dim(data_block))
+      # message(sum(is.na(data_block)))
       res <- .C("C_SOM", data = as.double(data_block), 
                 codes = as.double(codes), 
                 nhbrdist = as.double(nhbrdist), 
@@ -250,6 +255,7 @@ SOM <- function (data, xdim = 10, ydim = 10, rlen = 10, mst = 1,
       codes <- matrix(res$codes, nrow(codes), ncol(codes))
       colnames(codes) <- names(data)
       nhbrdist <- Dist.MST(codes)
+      message("Done")
     }
   }
   
@@ -297,10 +303,10 @@ MapDataToCodes <- function (codes, newdata, distf = 2) {
 MapDataToCodes_Arrow <- function (codes, newdata, distf = 2) {
 
   res <- c()
-  n_per_block = 200000
+  n_per_block = 100000
   for (data_block in split(data_pq,
          rep(1:ceiling(nrow(data_pq)/n_per_block),
-         each=n_per_block, length.out=nrow(data_pq)))) {
+             each=n_per_block, length.out=nrow(data_pq)))) {
     data_block <- data_block %>% collect()
     nnCodes <- .C("C_mapDataToCodes", 
                   as.double(newdata[, colnames(codes)]), 
